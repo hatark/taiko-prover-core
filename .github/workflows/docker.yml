@@ -1,0 +1,29 @@
+name: Docker
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [coverage]
+    types: [completed]
+    branches:
+      - master
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ["${{github.run_id}}", self-hosted, r6a.xlarge, "${{matrix.TARGET}}"]
+    strategy:
+      matrix:
+        TARGET: ['coordinator', 'web', 'prover', 'geth', 'dev']
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Login to ghcr.io
+        env:
+          PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: printf "$PAT" | docker login --username _ --password-stdin ghcr.io
+
+      - name: Build and push Docker images
+        env:
+          TARGET: ${{ matrix.TARGET }}
+          PLATFORM: 'linux/amd64,linux/arm64'
+        run: ./.github/workflows/docker.sh

@@ -1,0 +1,47 @@
+name: Coverage
+on:
+  merge_group:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+  pull_request:
+    types: [synchronize, opened, reopened, ready_for_review]
+
+jobs:
+  main:
+    if: github.event.pull_request.draft == false
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ["${{github.run_id}}", self-hosted, r6a.2xlarge]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ (github.event.pull_request && format('refs/pull/{0}/merge', github.event.pull_request.number)) || github.ref }}
+
+      - name: Setup
+        run: cp .env.example .env
+
+      - name: Build docker images
+        run: |
+          docker compose down -v --remove-orphans || true
+          docker buildx create --name mybuilder --use || echo 'skip'
+          docker compose build --progress plain bootnode dev
+
+      - name: Compile Contracts
+        run: |
+          docker compose run --no-TTY --rm --entrypoint bash dev -c './scripts/compile_contracts.sh'
+
+      - name: Run coordinator tests
+        run: |
+          docker compose run --no-TTY --rm --entrypoint bash dev -c './scripts/test_coverage.sh'
+
+      - name: Upload Coverage
+        if: success()
+        uses: coverallsapp/github-action@v1.2.4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: build/coverage-report.lcov
+          git-branch: ${{ (github.event.pull_request && format('refs/pull/{0}/merge', github.event.pull_request.number)) || github.ref }}
+          git-commit: ${{ (github.event.pull_request && github.event.pull_request.merge.sha) || github.sha }}

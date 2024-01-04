@@ -1,0 +1,81 @@
+name: Autogen
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [synchronize, opened, reopened, labeled, ready_for_review]
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cache:
+    if: github.event.pull_request.draft == false
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache-restore.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - id: cache-restore
+        uses: actions/cache/restore@v3
+        with:
+          path: Cargo.lock
+          key: ${{ github.workflow }}-${{ hashFiles('**/Cargo.lock', '**/*autogen*') }}
+          enableCrossOsArchive: true
+
+  autogen:
+    needs: [cache]
+    if: >
+      github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'allow-autogen')
+      || needs.cache.outputs.cache-hit != 'true'
+    timeout-minutes: 7200
+    runs-on: ["${{github.run_id}}", self-hosted, r6a.24xlarge]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Setup
+        run: cp .env.example .env
+
+      - name: Build docker images
+        run: |
+          docker buildx create --name mybuilder --use || echo 'skip'
+          docker compose build --progress plain dev
+
+      - name: Circuit config
+        run: |
+          docker compose run --use-aliases --no-TTY --rm --entrypoint bash dev -c './scripts/autogen.sh autogen_circuit_config'
+
+      - name: Cargo fmt
+        run: |
+          docker compose run --use-aliases --no-TTY --rm --entrypoint bash dev -c 'cargo fmt --all'
+
+      - name: EVM & Aggregation verifiers
+        run: |
+          docker compose run --use-aliases --no-TTY --rm --entrypoint bash dev -c './scripts/autogen.sh autogen_verifier_'
+
+      - name: Contracts
+        run: |
+          docker compose run --use-aliases --no-TTY --rm --entrypoint bash dev -c './scripts/compile_contracts.sh'
+
+      - name: Patch genesis templates
+        run: docker run --rm -v $(pwd):/host -w /host node:lts-alpine scripts/patch_genesis.mjs
+
+      - name: Commit
+        run: ./scripts/ci_autogen_commit.sh
+
+      - id: cache-save
+        uses: actions/cache/save@v3
+        with:
+          path: Cargo.lock
+          key: ${{ github.workflow }}-${{ hashFiles('**/Cargo.lock', '**/*autogen*') }}
+          enableCrossOsArchive: true
